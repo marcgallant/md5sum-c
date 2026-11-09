@@ -10,15 +10,21 @@
 #include <string.h>
 #include <unistd.h>
 
-#define BLOCK_SIZE 64
+#define CHUNK_SIZE 64
 
 enum {
     OPT_HELP = 10,
     OPT_VERSION
 };
 
+enum output_mode {
+    NONE = 0,
+    TEXT,
+    BINARY
+};
+
 struct options {
-    int binary;
+    enum output_mode output_mode;
     int check;
     int tag;
     int zero;
@@ -60,14 +66,14 @@ uint32_t K[] = {
 
 
 // Process the message in successive 512-bit chunks
-void process_block(uint8_t block[], uint32_t *a0, uint32_t *b0, uint32_t *c0, uint32_t *d0) {
+void process_chunk(uint8_t chunk[], uint32_t *a0, uint32_t *b0, uint32_t *c0, uint32_t *d0) {
 
     //break chunk into sixteen 32-bit words M[j], 0 ≤ j ≤ 15
     uint32_t M[16] = { 0 };
 
 	for (int i = 0; i < 16; i++) {
         for (int j = 0; j < 4; j++) {
-            M[i] |= block[i * 4 + j] << j * 8;
+            M[i] |= chunk[i * 4 + j] << j * 8;
         }
     }
 
@@ -78,7 +84,7 @@ void process_block(uint8_t block[], uint32_t *a0, uint32_t *b0, uint32_t *c0, ui
 	uint32_t D = *d0;
 
     // Main loop:
-    for (int i = 0; i < BLOCK_SIZE; i++) {
+    for (int i = 0; i < CHUNK_SIZE; i++) {
         uint32_t F, g;
 
         if (i < 16) {
@@ -114,68 +120,58 @@ void process_block(uint8_t block[], uint32_t *a0, uint32_t *b0, uint32_t *c0, ui
 
 int process_file(char *filename, char digest[33]) {
     uint64_t byte_count = 0;
-    uint8_t block[BLOCK_SIZE];
+    uint8_t chunk[CHUNK_SIZE];
     ssize_t n;
 
     uint32_t a0 = 0x67452301;
-    uint32_t *a0_ptr = &a0;
-
     uint32_t b0 = 0xefcdab89;
-    uint32_t *b0_ptr = &b0;
-
     uint32_t c0 = 0x98badcfe;
-    uint32_t *c0_ptr = &c0;
-
     uint32_t d0 = 0x10325476;
-    uint32_t *d0_ptr = &d0;
 
-    int fd = 0;
+    int fd = 0; 
     if (strcmp(filename,"-") != 0) {
         fd = open(filename, O_RDONLY);
 
         if (fd == -1) {
-            fprintf(stderr, "md5sum: %s: %s\n", filename, strerror(errno));
+            if (!opts.ignore_missing) fprintf(stderr, "md5sum: %s: %s\n", filename, strerror(errno));
             return -1;
         }
     }
         
     while (1) {
-        n = read(fd, block, BLOCK_SIZE);
+        n = read(fd, chunk, CHUNK_SIZE);
         
         if (n == -1) {
-			switch (errno) {
-			case EINTR:
-				continue;
-			default:
-                fprintf(stderr, "md5sum: %s: %s", filename, strerror(errno));
-                close(fd);
-				return -1;
-			}
+            if (errno == EINTR)
+                continue;
+            
+            if (!opts.ignore_missing) fprintf(stderr, "md5sum: %s: %s\n", filename, strerror(errno));
+            close(fd);
+			return -1;
 		}
 
         byte_count += n;
-        if (n < BLOCK_SIZE)
+        if (n < CHUNK_SIZE)
             break;
 
-        process_block(block, a0_ptr, b0_ptr, c0_ptr, d0_ptr);
+        process_chunk(chunk, &a0, &b0, &c0, &d0);
     }
-    close(fd);
 
     // Pre-processing: adding a single 1 bit
-    block[n++] = 0x80;
+    chunk[n++] = 0x80;
 
-    if (n == BLOCK_SIZE) {
-        process_block(block, a0_ptr, b0_ptr, c0_ptr, d0_ptr);
+    if (n == CHUNK_SIZE) {
+        process_chunk(chunk, &a0, &b0, &c0, &d0);
         n = 0;
     }
 
     // Pre-processing: padding with zeros
     // so that the message length in bytes ≡ 56 (mod 64).
     while (n != 56 ){
-        block[n++] = 0;
+        chunk[n++] = 0;
 
-        if (n == BLOCK_SIZE) {
-            process_block(block, a0_ptr, b0_ptr, c0_ptr, d0_ptr);
+        if (n == CHUNK_SIZE) {
+            process_chunk(chunk, &a0, &b0, &c0, &d0);
             n = 0;
         }
 
@@ -185,12 +181,12 @@ int process_file(char *filename, char digest[33]) {
 	uint64_t bits_count = byte_count << 3;
 	for (int i = 0; i < 8; i++) {
         uint8_t byte = bits_count >> (i * 8);
-        block[n + i] = byte;
+        chunk[n + i] = byte;
 	}
 
-    process_block(block, a0_ptr, b0_ptr, c0_ptr, d0_ptr);
+    process_chunk(chunk, &a0, &b0, &c0, &d0);
 
-    uint32_t words[] = { *a0_ptr, *b0_ptr, *c0_ptr, *d0_ptr };
+    uint32_t words[] = { a0, b0, c0, d0 };
     int pos = 0;
 
     for (int i = 0; i < 4; i++) {
@@ -209,7 +205,7 @@ void print_digest(char *filename, char digest[33]) {
     if (opts.tag)
         printf("MD5 (%s) = %s", filename, digest);
     else
-        printf("%s %c%s", digest, opts.binary == 1 ? '*' : ' ', filename);
+        printf("%s %c%s", digest, opts.output_mode == BINARY ? '*' : ' ', filename);
 
     printf("%c", opts.zero ? '\0' : '\n');
 }
@@ -222,7 +218,6 @@ struct checksum_entry {
 int parse_line(char *line, ssize_t len, struct checksum_entry *entry) {
     if (len < 35) 
         return -1;
-
     
     for (int i = 0; i < 32; i++) {
         if (!isxdigit(line[i]))
@@ -234,7 +229,6 @@ int parse_line(char *line, ssize_t len, struct checksum_entry *entry) {
 
     if (line[33] != ' ' && line[33] != '*')
         return -1;
-
 
     if (line[34] == '\0')
         return -1;
@@ -275,20 +269,19 @@ int check_md5(char * filename) {
             continue;
         }
 
-        if (process_file(entry.filename, digest) && !opts.ignore_missing) {
-            if (!opts.status) printf("%s: FAILED open or read\n", entry.filename);
+        if (process_file(entry.filename, digest)) {
+            if (!opts.ignore_missing) printf("%s: FAILED open or read\n", entry.filename);
             missing++;
             continue;
         }
-        
+
         if (strcmp(digest, entry.digest) != 0) {
             if (!opts.status) printf("%s: FAILED\n", entry.filename);
             mismatch++;
             continue;
         }
         
-        if (!opts.quiet)
-            if (!opts.status) printf("%s: OK\n", entry.filename);
+        if (!opts.quiet && !opts.status) printf("%s: OK\n", entry.filename);
     }
 
     if (line)
@@ -305,60 +298,42 @@ int check_md5(char * filename) {
         if (!opts.strict) return -1;
     }
     
+    if (missing != 0 && !opts.ignore_missing) {
+        if (!opts.status) fprintf(stderr, "md5sum: WARNING: %lu listed file%s could not be read\n", missing, missing > 1 ? "s" : "");
+    }
+    
     if (mismatch != 0) {
         if (!opts.status) fprintf(stderr, "md5sum: WARNING: %lu computed checksum%s did NOT match\n", mismatch, mismatch > 1 ? "s" : "");
     }
 
-    if (missing != 0) {
-        if (!opts.status) fprintf(stderr, "md5sum: WARNING: %lu listed file%s could not be read\n", missing, missing > 1 ? "s" : "");
+    if (missing + unformated + mismatch == nlines && opts.ignore_missing) {
+        if (!opts.status) fprintf(stderr, "md5sum: %s: no file was verified\n", filename);
     }
     
     return mismatch + missing;
 }
 
 void print_help() {
-    puts("Usage: md5sum [OPTION]... [FILE]...\n"
-    "Print or check MD5 (128-bit) checksums.\n"
+    puts("Print or check the MD5 checksums\n"
     "\n"
-    "With no FILE, or when FILE is -, read standard input.\n"
-    "  -b, --binary          read in binary mode\n"
+    "Usage: md5sum [OPTIONS] [FILE]...\n"
+    "\n"
+    "Options:\n"
     "  -c, --check           read checksums from the FILEs and check them\n"
-    "      --tag             create a BSD-style checksum\n"
-    "  -t, --text            read in text mode (default)\n"
-    "  -z, --zero            end each output line with NUL, not newline,\n"
-    "                          and disable file name escaping\n"
-    "\n"
-    "The following five options are useful only when verifying checksums:\n"
-    "      --ignore-missing  don't fail or report status for missing files\n"
-    "      --quiet           don't print OK for each successfully verified file\n"
-    "      --status          don't output anything, status code shows success\n"
-    "      --strict          exit non-zero for improperly formatted checksum lines\n"
     "  -w, --warn            warn about improperly formatted checksum lines\n"
-    "\n"
-    "      --help        display this help and exit\n"
-    "      --version     output version information and exit\n"
-    "\n"
-    "The sums are computed as described in RFC 1321.\n"
-    "When checking, the input should be a former output of this program.\n"
-    "The default mode is to print a line with: checksum, a space,\n"
-    "a character indicating input mode ('*' for binary, ' ' for text\n"
-    "or where binary is insignificant), and name for each FILE.\n"
-    "\n"
-    "Note: There is no difference between binary mode and text mode on GNU systems.\n"
-    "\n"
-    "GNU coreutils online help: <https://www.gnu.org/software/coreutils/>\n"
-    "Full documentation <https://www.gnu.org/software/coreutils/md5sum>\n"
-    "or available locally via: info '(coreutils) md5sum invocation'");
+    "      --status          don't output anything, status code shows success\n"
+    "      --quiet           don't print OK for each successfully verified file\n"
+    "      --ignore-missing  don't fail or report status for missing files\n"
+    "      --strict          exit non-zero for improperly formatted checksum lines\n"
+    "      --tag             create a BSD style checksum\n"
+    "  -t, --text            read in text mode (default)\n"
+    "  -z, --zero            end each output line with NUL, not newline, and disable file name escaping\n"
+    "  -h, --help            Print help\n"
+    "  -V, --version         Print version");
 }
 
 void print_version() {
-    puts("md5sum (GNU coreutils) 9.4\n"
-    "Copyright (C) 2023 Free Software Foundation, Inc.\n"
-    "License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\n"
-    "This is free software: you are free to change and redistribute it.\n"
-    "There is NO WARRANTY, to the extent permitted by law.\n"
-    "\n"
-    "Written by Ulrich Drepper, Scott Miller, and David Madore.");
+    puts("md5sum (uutils coreutils) 0.8.0");
 }
 
 int option_error(void) {
@@ -392,13 +367,13 @@ int main(int argc, char *argv[]) {
             case 0:
                 break;
             case 'b':
-                opts.binary = 1;
+                opts.output_mode = BINARY;
                 break;
             case 'c':
                 opts.check = 1;
                 break;
             case 't':
-                opts.binary = -1;
+                opts.output_mode = TEXT;
                 break;
             case 'z':
                 opts.zero = 1;
@@ -424,7 +399,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if ((opts.binary) && opts.check) {
+    if (opts.output_mode && opts.check) {
         printf("md5sum: the --binary and --text options are meaningless when verifying checksums\n");
         return option_error();
     }

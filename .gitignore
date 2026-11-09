@@ -55,7 +55,7 @@ dkms.conf
 *.dwo
 
 md5.sh
-md5
+md5sum
 
 *.stderr
 *.stdout

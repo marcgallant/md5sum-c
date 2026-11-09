@@ -1,6 +1,6 @@
 CFLAGS = -fPIC -Wall -Wextra -Werror -std=c11 -I include
 
-SRC = md5.c
+SRC = md5sum.c
 OBJ = $(SRC:.c=.o)
 BIN = $(SRC:.c=)
 

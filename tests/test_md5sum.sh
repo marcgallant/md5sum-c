@@ -9,7 +9,7 @@ test_suite() {
     md5sum "$@" > tests/md5sum.stdout 2> tests/md5sum.stderr
     EXPECTED=$?
 
-    ./md5 "$@" > tests/mymd5sum.stdout 2> tests/mymd5sum.stderr
+    ./md5sum "$@" > tests/mymd5sum.stdout 2> tests/mymd5sum.stderr
     ACTUAL=$?
 
     if [ "$ACTUAL" -ne "$EXPECTED" ]; then
