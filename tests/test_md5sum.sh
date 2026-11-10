@@ -89,3 +89,6 @@ test_suite -c --warn files/checksum_mismatch.txt
 test_suite -c -w files/checksum.txt
 test_suite -c -w files/checksum_missing.txt
 test_suite -c -w files/checksum_mismatch.txt
+
+test_suite -c -b file/checksum.txt
+test_suite -c -t file/checksum.txt
